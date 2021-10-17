@@ -26,6 +26,7 @@ type Config struct {
 			CertPath   string `json:"cert_path"`
 			KeyPath    string `json:"key_path"`
 		} `json:"forward_servers"`
+		LocalHTTPAddr string `json:"local_http_addr"`
 	} `json:"server"`
 
 	Client struct {
