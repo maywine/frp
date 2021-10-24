@@ -2,7 +2,9 @@ package main
 
 import (
 	"frp/config"
+	"math/rand"
 	"os"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -40,4 +42,5 @@ func main() {
 
 func init() {
 	log.SetFormatter(&log.TextFormatter{})
+	rand.Seed(time.Now().UnixNano())
 }

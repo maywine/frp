@@ -8,6 +8,10 @@ import (
 )
 
 var (
+
+	// MagicNumber is magic number
+	MagicNumber uint64 = 235300467370941978
+
 	// C is the applications config
 	C *Config = new(Config)
 )
