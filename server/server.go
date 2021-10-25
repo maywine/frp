@@ -1,15 +1,16 @@
 package server
 
 import (
-	crand "crypto/rand"
+	"bytes"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/binary"
 	"frp/config"
 	"io"
-	mrand "math/rand"
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
@@ -51,7 +52,7 @@ func (s *Server) Start() (err error) {
 
 	certs = append(certs, serverCert)
 	tlsConfig := tls.Config{Certificates: certs}
-	tlsConfig.Rand = crand.Reader
+	tlsConfig.Rand = rand.Reader
 	s.listener, err = tls.Listen("tcp", config.C.Server.ListenAddr, &tlsConfig)
 	if err != nil {
 		return errors.Wrap(err, "listen faileds")
@@ -117,6 +118,7 @@ func (s *Server) startHandleConn(conn net.Conn) {
 		case <-server.quitChan:
 			log.Warnf("forward server %s exit", serverName)
 		case server.connsChan <- tlsConn:
+			log.Debug("new connection %s", tlsConn.RemoteAddr().String())
 		}
 	}
 }
@@ -201,8 +203,39 @@ func (s *Server) handleClientConn(conn *tls.Conn) {
 }
 
 type Session struct {
-	clientConn net.Conn
-	serverConn net.Conn
+	clientConn  net.Conn
+	serverConn  net.Conn
+	pendingData []byte
+}
+
+func (s *Session) forwardLoop() {
+	defer s.clientConn.Close()
+	defer s.serverConn.Close()
+
+	n1 := len(s.pendingData)
+	n2 := 0
+	for n2 < n1 {
+		n, err := s.serverConn.Write(s.pendingData[n2:])
+		if err != nil {
+			return
+		}
+
+		n2 += n
+	}
+
+	done := make(chan struct{})
+	go func() {
+		io.Copy(s.serverConn, s.clientConn)
+		done <- struct{}{}
+	}()
+
+	go func() {
+		io.Copy(s.clientConn, s.serverConn)
+		done <- struct{}{}
+	}()
+
+	<-done
+	<-done
 }
 
 // ForwardServer define forward server
@@ -212,6 +245,7 @@ type ForwardServer struct {
 	quitChan   chan struct{}
 	clientConn net.Conn
 	connsChan  chan *tls.Conn
+	sessionsID uint64
 	sessions   sync.Map
 }
 
@@ -244,14 +278,72 @@ func (fs *ForwardServer) handleSession(conn *tls.Conn) {
 			|____________|___________|
 	*/
 
-	// var buf [16]byte
-	// readLen := 0
-	// for readLen < 16 {
-	// 	n, err := conn.Read(buf)
-	// 	if err != nil {
+	var buf [16]byte
+	readLen := 0
 
-	// 	}
-	// }
+	n, err := readConn(conn, buf[0:8], 8, 5*time.Second)
+	if err != nil {
+		log.Warnf("read connection failed: %s", err.Error())
+		conn.Close()
+		return
+	}
+	readLen += n
+
+	isClinet := false
+	var session *Session
+
+	number := binary.LittleEndian.Uint64(buf[0:8])
+	if number != config.MagicNumber {
+		isClinet = true
+	} else {
+		n, err = readConn(conn, buf[8:16], 8, 5*time.Second)
+		if err != nil {
+			log.Warnf("read connection failed: %s", err.Error())
+			conn.Close()
+			return
+		}
+		readLen += n
+		sessionID := binary.LittleEndian.Uint64(buf[8:16])
+		s, ok := fs.sessions.Load(sessionID)
+		if !ok {
+			isClinet = true
+		} else {
+			session = s.(*Session)
+		}
+	}
+
+	if isClinet {
+		session = &Session{}
+		session.clientConn = conn
+		session.pendingData = buf[0:readLen]
+		id := atomic.AddUint64(&fs.sessionsID, 1)
+		fs.sessions.Store(id, session)
+
+		/*
+			          8           8           4
+				 ________________________________________
+				|            |           |         |     |
+				|magic number|session id |token_len|token|
+				|____________|___________|_________|_____|
+		*/
+
+		var data = []interface{}{
+			config.MagicNumber,
+			id,
+			len(config.C.Server.Token),
+			config.C.Server.Token,
+		}
+		buf := new(bytes.Buffer)
+		for _, v := range data {
+			err := binary.Write(buf, binary.LittleEndian, v)
+			if err != nil {
+				panic(errors.Wrap(err, "make session message failed"))
+			}
+		}
+	} else {
+		session.serverConn = conn
+		session.forwardLoop()
+	}
 }
 
 func (fs *ForwardServer) stopAllSessions() {
@@ -292,10 +384,6 @@ func ForwardHTTPLoop(readbuf []byte, addr string, inConn net.Conn) {
 
 	<-done
 	<-done
-}
-
-func randID() uint64 {
-	return mrand.Uint64()
 }
 
 func readConn(conn net.Conn, buf []byte, maxLen int, timeOut time.Duration) (int, error) {
