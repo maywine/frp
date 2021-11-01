@@ -19,10 +19,10 @@ import (
 
 // Server define server
 type Server struct {
-	fserver  sync.Map
-	stopChan chan struct{}
-	listener net.Listener
-	wg       sync.WaitGroup
+	forwardServer sync.Map
+	stopChan      chan struct{}
+	listener      net.Listener
+	wg            sync.WaitGroup
 }
 
 // New create the Server
@@ -47,7 +47,7 @@ func (s *Server) Start() (err error) {
 			return errors.Wrap(err, "load certificate failed")
 		}
 		certs = append(certs, cert)
-		s.fserver.Store(fs.ServerName, nil)
+		s.forwardServer.Store(fs.ServerName, nil)
 	}
 
 	certs = append(certs, serverCert)
@@ -82,7 +82,7 @@ func (s *Server) Start() (err error) {
 func (s *Server) Stop() {
 	log.Infof("stop the server...")
 	s.stopChan <- struct{}{}
-	s.fserver.Range(func(key, value interface{}) bool {
+	s.forwardServer.Range(func(key, value interface{}) bool {
 		fs := value.(*ForwardServer)
 		if fs != nil {
 			fs.stop()
@@ -94,17 +94,19 @@ func (s *Server) Stop() {
 	log.Infof("stop server completely")
 }
 
-// Stop stop the server
 func (s *Server) startHandleConn(conn net.Conn) {
 	tlsConn := conn.(*tls.Conn)
-	tlsConn.Handshake()
+	if err := tlsConn.Handshake(); err != nil {
+		log.Warnf("handshake failed: %s", err.Error())
+		return
+	}
 
 	serverName := tlsConn.ConnectionState().ServerName
 	if serverName == config.C.Server.Host {
 		s.handleClientConn(tlsConn)
 	} else {
-		fserver, ok := s.fserver.Load(serverName)
-		if !ok || fserver == nil {
+		forwardServer, ok := s.forwardServer.Load(serverName)
+		if !ok || forwardServer == nil {
 			if !ok {
 				log.Warnf("server %s not support", serverName)
 			} else {
@@ -113,12 +115,12 @@ func (s *Server) startHandleConn(conn net.Conn) {
 			tlsConn.Close()
 		}
 
-		server := fserver.(*ForwardServer)
+		server := forwardServer.(*ForwardServer)
 		select {
 		case <-server.quitChan:
 			log.Warnf("forward server %s exit", serverName)
 		case server.connsChan <- tlsConn:
-			log.Debug("new connection %s", tlsConn.RemoteAddr().String())
+			log.Debugf("new connection %s", tlsConn.RemoteAddr().String())
 		}
 	}
 }
@@ -137,7 +139,7 @@ func (s *Server) handleClientConn(conn *tls.Conn) {
 
 	n, err := readConn(conn, buf[0:8], 8, 5*time.Second)
 	if err != nil {
-		log.Warnf("read client request failed: ", err.Error())
+		log.Warnf("read client request failed: %s", err.Error())
 		conn.Close()
 		return
 	}
@@ -152,7 +154,7 @@ func (s *Server) handleClientConn(conn *tls.Conn) {
 
 	n, err = readConn(conn, buf[8:], 8, 5*time.Second)
 	if err != nil {
-		log.Warnf("read client request failed: ", err.Error())
+		log.Warnf("read client request failed: %s", err.Error())
 		conn.Close()
 		return
 	}
@@ -170,7 +172,7 @@ func (s *Server) handleClientConn(conn *tls.Conn) {
 	// read token and server name
 	n, err = readConn(conn, buf[readLen:], int(requireLen), 5*time.Second)
 	if err != nil {
-		log.Warnf("read client request failed: ", err.Error())
+		log.Warnf("read client request failed: %s", err.Error())
 		conn.Close()
 		return
 	}
@@ -184,16 +186,16 @@ func (s *Server) handleClientConn(conn *tls.Conn) {
 	}
 
 	parseserverName := string(buf[16+tokenLen:])
-	fserver, ok := s.fserver.Load(parseserverName)
+	forwardServer, ok := s.forwardServer.Load(parseserverName)
 	if !ok {
 		log.Warnf("server %s not found", parseserverName)
 		conn.Close()
 		return
 	}
 
-	if fserver == nil {
+	if forwardServer == nil {
 		fs := &ForwardServer{wg: &s.wg, clientConn: conn, connsChan: make(chan *tls.Conn, 256)}
-		s.fserver.Store(parseserverName, fs)
+		s.forwardServer.Store(parseserverName, fs)
 		fs.start()
 	} else {
 		log.Warnf("repeat forwardserver %s connection", parseserverName)
@@ -225,12 +227,12 @@ func (s *Session) forwardLoop() {
 
 	done := make(chan struct{})
 	go func() {
-		io.Copy(s.serverConn, s.clientConn)
+		_, _ = io.Copy(s.serverConn, s.clientConn)
 		done <- struct{}{}
 	}()
 
 	go func() {
-		io.Copy(s.clientConn, s.serverConn)
+		_, _ = io.Copy(s.clientConn, s.serverConn)
 		done <- struct{}{}
 	}()
 
@@ -373,12 +375,12 @@ func ForwardHTTPLoop(readbuf []byte, addr string, inConn net.Conn) {
 
 	done := make(chan struct{})
 	go func() {
-		io.Copy(outConn, inConn)
+		_, _ = io.Copy(outConn, inConn)
 		done <- struct{}{}
 	}()
 
 	go func() {
-		io.Copy(inConn, outConn)
+		_, _ = io.Copy(inConn, outConn)
 		done <- struct{}{}
 	}()
 
@@ -394,7 +396,10 @@ func readConn(conn net.Conn, buf []byte, maxLen int, timeOut time.Duration) (int
 	beg := time.Now()
 	readLen := 0
 	for readLen < maxLen {
-		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		if err := conn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
+			return 0, errors.Wrap(err, "set read deadline failed")
+		}
+
 		n, err := conn.Read(buf[readLen:])
 		if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
 			return 0, errors.Wrap(err, "read connection failed")
