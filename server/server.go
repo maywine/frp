@@ -194,7 +194,13 @@ func (s *Server) handleClientConn(conn *tls.Conn) {
 	}
 
 	if forwardServer == nil {
-		fs := &ForwardServer{wg: &s.wg, clientConn: conn, connsChan: make(chan *tls.Conn, 256)}
+		fs := &ForwardServer{
+			wg:         &s.wg,
+			stopChan:   make(chan struct{}),
+			quitChan:   make(chan struct{}),
+			serverName: parseserverName,
+			clientConn: conn,
+			connsChan:  make(chan *tls.Conn, 256)}
 		s.forwardServer.Store(parseserverName, fs)
 		fs.start()
 	} else {
@@ -205,14 +211,20 @@ func (s *Server) handleClientConn(conn *tls.Conn) {
 }
 
 type Session struct {
+	sessionID   uint64
+	fs          *ForwardServer
 	clientConn  net.Conn
 	serverConn  net.Conn
+	waitCh      chan struct{}
 	pendingData []byte
 }
 
 func (s *Session) forwardLoop() {
+	defer close(s.waitCh)
 	defer s.clientConn.Close()
 	defer s.serverConn.Close()
+
+	s.waitCh <- struct{}{}
 
 	n1 := len(s.pendingData)
 	n2 := 0
@@ -238,6 +250,22 @@ func (s *Session) forwardLoop() {
 
 	<-done
 	<-done
+
+	s.fs.removeSession(s.sessionID)
+}
+
+func (s *Session) close() {
+	if s == nil {
+		return
+	}
+
+	if s.clientConn != nil {
+		_ = s.clientConn.Close()
+	}
+
+	if s.serverConn != nil {
+		_ = s.serverConn.Close()
+	}
 }
 
 // ForwardServer define forward server
@@ -245,10 +273,21 @@ type ForwardServer struct {
 	wg         *sync.WaitGroup
 	stopChan   chan struct{}
 	quitChan   chan struct{}
+	serverName string
 	clientConn net.Conn
 	connsChan  chan *tls.Conn
 	sessionsID uint64
 	sessions   sync.Map
+}
+
+func (s *ForwardServer) removeSession(id uint64) {
+	val, ok := s.sessions.Load(id)
+	if !ok {
+		return
+	}
+	session := val.(*Session)
+	session.close()
+	s.sessions.Delete(id)
 }
 
 func (fs *ForwardServer) stop() {
@@ -280,10 +319,10 @@ func (fs *ForwardServer) handleSession(conn *tls.Conn) {
 			|____________|___________|
 	*/
 
-	var buf [16]byte
+	var readBuf [16]byte
 	readLen := 0
 
-	n, err := readConn(conn, buf[0:8], 8, 5*time.Second)
+	n, err := readConn(conn, readBuf[0:8], 8, 5*time.Second)
 	if err != nil {
 		log.Warnf("read connection failed: %s", err.Error())
 		conn.Close()
@@ -294,18 +333,18 @@ func (fs *ForwardServer) handleSession(conn *tls.Conn) {
 	isClinet := false
 	var session *Session
 
-	number := binary.LittleEndian.Uint64(buf[0:8])
+	number := binary.LittleEndian.Uint64(readBuf[0:8])
 	if number != config.MagicNumber {
 		isClinet = true
 	} else {
-		n, err = readConn(conn, buf[8:16], 8, 5*time.Second)
+		n, err = readConn(conn, readBuf[8:16], 8, 5*time.Second)
 		if err != nil {
 			log.Warnf("read connection failed: %s", err.Error())
 			conn.Close()
 			return
 		}
 		readLen += n
-		sessionID := binary.LittleEndian.Uint64(buf[8:16])
+		sessionID := binary.LittleEndian.Uint64(readBuf[8:16])
 		s, ok := fs.sessions.Load(sessionID)
 		if !ok {
 			isClinet = true
@@ -314,37 +353,59 @@ func (fs *ForwardServer) handleSession(conn *tls.Conn) {
 		}
 	}
 
-	if isClinet {
-		session = &Session{}
-		session.clientConn = conn
-		session.pendingData = buf[0:readLen]
-		id := atomic.AddUint64(&fs.sessionsID, 1)
-		fs.sessions.Store(id, session)
-
-		/*
-			          8           8           4
-				 ________________________________________
-				|            |           |         |     |
-				|magic number|session id |token_len|token|
-				|____________|___________|_________|_____|
-		*/
-
-		var data = []interface{}{
-			config.MagicNumber,
-			id,
-			len(config.C.Server.Token),
-			config.C.Server.Token,
-		}
-		buf := new(bytes.Buffer)
-		for _, v := range data {
-			err := binary.Write(buf, binary.LittleEndian, v)
-			if err != nil {
-				panic(errors.Wrap(err, "make session message failed"))
-			}
-		}
-	} else {
+	if !isClinet {
 		session.serverConn = conn
 		session.forwardLoop()
+		return
+	}
+
+	session = &Session{
+		sessionID:   atomic.AddUint64(&fs.sessionsID, 1),
+		fs:          fs,
+		clientConn:  conn,
+		waitCh:      make(chan struct{}),
+		pendingData: readBuf[0:readLen],
+	}
+	fs.sessions.Store(session.sessionID, session)
+
+	/*
+		          8           8           4
+			 ________________________________________
+			|            |           |         |     |
+			|magic number|session id |token_len|token|
+			|____________|___________|_________|_____|
+	*/
+
+	var data = []interface{}{
+		config.MagicNumber,
+		session.sessionID,
+		len(config.C.Server.Token),
+		config.C.Server.Token,
+	}
+	buf := new(bytes.Buffer)
+	for _, v := range data {
+		err := binary.Write(buf, binary.LittleEndian, v)
+		if err != nil {
+			fs.removeSession(session.sessionID)
+			return
+		}
+	}
+
+	err = writeConn(session.clientConn, buf.Bytes())
+	if err != nil {
+		log.Warnf("write session info failed: %s", err.Error())
+		fs.removeSession(session.sessionID)
+		return
+	}
+
+	ticker := time.NewTicker(10 * time.Second)
+	select {
+	case <-ticker.C:
+		log.Warnf("wait for server %s timeout", fs.serverName)
+		fs.sessions.Delete(session.sessionID)
+		ForwardHTTPLoop(session.pendingData, config.C.Server.LocalHTTPAddr, conn)
+	case <-session.waitCh:
+		log.Info("new session for %s handshake done", fs.serverName)
 	}
 }
 
@@ -388,12 +449,25 @@ func ForwardHTTPLoop(readbuf []byte, addr string, inConn net.Conn) {
 	<-done
 }
 
-func readConn(conn net.Conn, buf []byte, maxLen int, timeOut time.Duration) (int, error) {
-	if timeOut < 1*time.Second {
-		timeOut = 1 * time.Second
+func writeConn(conn net.Conn, buf []byte) error {
+	bufLen := len(buf)
+	n := 0
+	for bufLen < n {
+		m, err := conn.Write(buf[n:bufLen])
+		if err != nil {
+			return err
+		}
+		n += m
+	}
+	return nil
+}
+
+func readConn(conn net.Conn, buf []byte, maxLen int, timeout time.Duration) (int, error) {
+	if timeout < 1*time.Second {
+		timeout = 1 * time.Second
 	}
 
-	beg := time.Now()
+	deadline := time.Now().Add(timeout)
 	readLen := 0
 	for readLen < maxLen {
 		if err := conn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
@@ -406,7 +480,7 @@ func readConn(conn net.Conn, buf []byte, maxLen int, timeOut time.Duration) (int
 		}
 
 		readLen += n
-		if beg.Add(timeOut).Before(time.Now()) {
+		if deadline.Before(time.Now()) {
 			return readLen, nil
 		}
 	}
