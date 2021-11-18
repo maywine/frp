@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/binary"
-	"frp/config"
 	"io"
 	"net"
 	"os"
@@ -15,14 +14,16 @@ import (
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+
+	"frp/config"
 )
 
 // Server define server
 type Server struct {
-	forwardServer sync.Map
-	stopChan      chan struct{}
-	listener      net.Listener
-	wg            sync.WaitGroup
+	forwardServerMap sync.Map
+	stopChan         chan struct{}
+	listener         net.Listener
+	forwardServerWG  sync.WaitGroup
 }
 
 // New create the Server
@@ -47,18 +48,18 @@ func (s *Server) Start() (err error) {
 			return errors.Wrap(err, "load certificate failed")
 		}
 		certs = append(certs, cert)
-		s.forwardServer.Store(fs.ServerName, nil)
+		s.forwardServerMap.Store(fs.ServerName, nil)
 	}
-
 	certs = append(certs, serverCert)
 	tlsConfig := tls.Config{Certificates: certs}
 	tlsConfig.Rand = rand.Reader
 	s.listener, err = tls.Listen("tcp", config.C.Server.ListenAddr, &tlsConfig)
 	if err != nil {
-		return errors.Wrap(err, "listen faileds")
+		return errors.Wrap(err, "listen failed")
 	}
+
+	s.forwardServerWG.Add(1)
 	go func() {
-		defer s.listener.Close()
 		for {
 			select {
 			case <-s.stopChan:
@@ -82,15 +83,15 @@ func (s *Server) Start() (err error) {
 func (s *Server) Stop() {
 	log.Infof("stop the server...")
 	s.stopChan <- struct{}{}
-	s.forwardServer.Range(func(key, value interface{}) bool {
+	s.listener.Close()
+	s.forwardServerMap.Range(func(key, value interface{}) bool {
 		fs := value.(*ForwardServer)
 		if fs != nil {
 			fs.stop()
 		}
 		return true
 	})
-
-	s.wg.Wait()
+	s.forwardServerWG.Wait()
 	log.Infof("stop server completely")
 }
 
@@ -105,8 +106,8 @@ func (s *Server) startHandleConn(conn net.Conn) {
 	if serverName == config.C.Server.Host {
 		s.handleClientConn(tlsConn)
 	} else {
-		forwardServer, ok := s.forwardServer.Load(serverName)
-		if !ok || forwardServer == nil {
+		forwardServerMap, ok := s.forwardServerMap.Load(serverName)
+		if !ok || forwardServerMap == nil {
 			if !ok {
 				log.Warnf("server %s not support", serverName)
 			} else {
@@ -115,11 +116,11 @@ func (s *Server) startHandleConn(conn net.Conn) {
 			tlsConn.Close()
 		}
 
-		server := forwardServer.(*ForwardServer)
+		fs := forwardServerMap.(*ForwardServer)
 		select {
-		case <-server.quitChan:
+		case <-fs.quitChan:
 			log.Warnf("forward server %s exit", serverName)
-		case server.connsChan <- tlsConn:
+		case fs.connsChan <- tlsConn:
 			log.Debugf("new connection %s", tlsConn.RemoteAddr().String())
 		}
 	}
@@ -185,26 +186,27 @@ func (s *Server) handleClientConn(conn *tls.Conn) {
 		return
 	}
 
-	parseserverName := string(buf[16+tokenLen:])
-	forwardServer, ok := s.forwardServer.Load(parseserverName)
+	parseServerName := string(buf[16+tokenLen:])
+	forwardServerMap, ok := s.forwardServerMap.Load(parseServerName)
 	if !ok {
-		log.Warnf("server %s not found", parseserverName)
+		log.Warnf("server %s not found", parseServerName)
 		conn.Close()
 		return
 	}
 
-	if forwardServer == nil {
+	if forwardServerMap == nil {
 		fs := &ForwardServer{
-			wg:         &s.wg,
-			stopChan:   make(chan struct{}),
-			quitChan:   make(chan struct{}),
-			serverName: parseserverName,
-			clientConn: conn,
-			connsChan:  make(chan *tls.Conn, 256)}
-		s.forwardServer.Store(parseserverName, fs)
+			forwardServerWG: &s.forwardServerWG,
+			stopChan:        make(chan struct{}),
+			quitChan:        make(chan struct{}),
+			serverName:      parseServerName,
+			clientConn:      conn,
+			connsChan:       make(chan *tls.Conn, 256)}
+		s.forwardServerMap.Store(parseServerName, fs)
+		fs.forwardServerWG.Add(1)
 		fs.start()
 	} else {
-		log.Warnf("repeat forwardserver %s connection", parseserverName)
+		log.Warnf("repeat forwardserver %s connection", parseServerName)
 		conn.Close()
 		return
 	}
@@ -252,6 +254,7 @@ func (s *Session) forwardLoop() {
 	<-done
 
 	s.fs.removeSession(s.sessionID)
+	s.fs.sessionWG.Done()
 }
 
 func (s *Session) close() {
@@ -270,24 +273,53 @@ func (s *Session) close() {
 
 // ForwardServer define forward server
 type ForwardServer struct {
-	wg         *sync.WaitGroup
-	stopChan   chan struct{}
-	quitChan   chan struct{}
+	forwardServerWG *sync.WaitGroup
+	stopChan        chan struct{}
+	quitChan        chan struct{}
+
 	serverName string
 	clientConn net.Conn
 	connsChan  chan *tls.Conn
-	sessionsID uint64
-	sessions   sync.Map
+
+	sessionWG   sync.WaitGroup
+	sessionsID  uint64
+	sessionsMut sync.Mutex
+	sessionsMap map[uint64]*Session
 }
 
-func (s *ForwardServer) removeSession(id uint64) {
-	val, ok := s.sessions.Load(id)
+func (fs *ForwardServer) removeSession(id uint64) {
+	fs.sessionsMut.Lock()
+	defer fs.sessionsMut.Unlock()
+	session, ok := fs.sessionsMap[id]
 	if !ok {
 		return
 	}
-	session := val.(*Session)
 	session.close()
-	s.sessions.Delete(id)
+	delete(fs.sessionsMap, id)
+}
+
+func (fs *ForwardServer) storeSession(id uint64, session *Session) {
+	fs.sessionsMut.Lock()
+	defer fs.sessionsMut.Unlock()
+	fs.sessionsMap[id] = session
+}
+
+func (fs *ForwardServer) loadSession(id uint64) (session *Session, ok bool) {
+	fs.sessionsMut.Lock()
+	defer fs.sessionsMut.Unlock()
+	session, ok = fs.sessionsMap[id]
+	return session, ok
+}
+
+func (fs *ForwardServer) stopAllSessions() {
+	fs.sessionsMut.Lock()
+	defer fs.sessionsMut.Unlock()
+
+	for _, s := range fs.sessionsMap {
+		s.close()
+	}
+
+	fs.sessionWG.Wait()
 }
 
 func (fs *ForwardServer) stop() {
@@ -295,8 +327,7 @@ func (fs *ForwardServer) stop() {
 }
 
 func (fs *ForwardServer) start() {
-	fs.wg.Add(1)
-
+	defer fs.forwardServerWG.Done()
 	for {
 		select {
 		case <-fs.stopChan:
@@ -345,16 +376,16 @@ func (fs *ForwardServer) handleSession(conn *tls.Conn) {
 		}
 		readLen += n
 		sessionID := binary.LittleEndian.Uint64(readBuf[8:16])
-		s, ok := fs.sessions.Load(sessionID)
+		ok := false
+		session, ok = fs.loadSession(sessionID)
 		if !ok {
 			isClinet = true
-		} else {
-			session = s.(*Session)
 		}
 	}
 
 	if !isClinet {
 		session.serverConn = conn
+		fs.sessionWG.Add(1)
 		session.forwardLoop()
 		return
 	}
@@ -366,7 +397,7 @@ func (fs *ForwardServer) handleSession(conn *tls.Conn) {
 		waitCh:      make(chan struct{}),
 		pendingData: readBuf[0:readLen],
 	}
-	fs.sessions.Store(session.sessionID, session)
+	fs.storeSession(session.sessionID, session)
 
 	/*
 		          8           8           4
@@ -402,15 +433,11 @@ func (fs *ForwardServer) handleSession(conn *tls.Conn) {
 	select {
 	case <-ticker.C:
 		log.Warnf("wait for server %s timeout", fs.serverName)
-		fs.sessions.Delete(session.sessionID)
+		fs.removeSession(session.sessionID)
 		ForwardHTTPLoop(session.pendingData, config.C.Server.LocalHTTPAddr, conn)
 	case <-session.waitCh:
 		log.Info("new session for %s handshake done", fs.serverName)
 	}
-}
-
-func (fs *ForwardServer) stopAllSessions() {
-
 }
 
 func ForwardHTTPLoop(readbuf []byte, addr string, inConn net.Conn) {
