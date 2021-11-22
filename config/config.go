@@ -8,7 +8,6 @@ import (
 )
 
 var (
-
 	// MagicNumber is magic number
 	MagicNumber uint64 = 235300467370941978
 
@@ -18,8 +17,9 @@ var (
 
 // Config define the config
 type Config struct {
-	Type   string `json:"type"`
-	Server struct {
+	Type        string `json:"type"`
+	MagicNumber uint64 `json:"magic_number"`
+	Server      struct {
 		Token          string `json:"token"`
 		ListenAddr     string `json:"listen_addr"`
 		Host           string `json:"host"`
@@ -53,6 +53,10 @@ func LoadConfig(configPath string) (err error) {
 
 	if err = json.Unmarshal(bytes, C); err != nil {
 		return errors.Wrap(err, "parse config failed")
+	}
+
+	if C.MagicNumber != 0 {
+		MagicNumber = C.MagicNumber
 	}
 
 	return nil
