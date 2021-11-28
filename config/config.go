@@ -13,6 +13,9 @@ var (
 
 	// C is the applications config
 	C *Config = new(Config)
+
+	// MagicNumberNotEqual define error for magic number not equal
+	MagicNumberNotEqual = errors.Errorf("magic number not equal")
 )
 
 // Config define the config
