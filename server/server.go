@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	httpReqData = []byte("GET / HTTP/1.1 \r\nAccept: */*\n\r\n")
+	httpReqData = []byte("GET / HTTP/1.1\r\nAccept: */*\n\r\n")
 )
 
 // Server define server
@@ -57,8 +57,10 @@ func (s *Server) Start() (err error) {
 		s.forwardServerMap.Store(fs.ServerName, f)
 	}
 	certs = append(certs, serverCert)
-	tlsConfig := tls.Config{Certificates: certs}
-	tlsConfig.Rand = rand.Reader
+	tlsConfig := tls.Config{
+		Certificates: certs,
+		Rand:         rand.Reader,
+	}
 	s.listener, err = tls.Listen("tcp", config.C.Server.ListenAddr, &tlsConfig)
 	if err != nil {
 		return errors.Wrap(err, "listen failed")
@@ -89,7 +91,7 @@ func (s *Server) Start() (err error) {
 		}
 	}()
 
-	return err
+	return nil
 }
 
 // Stop stop the server
@@ -130,7 +132,12 @@ func (s *Server) handleConn(conn net.Conn) {
 			_ = tlsConn.Close()
 		} else {
 			f := fs.(*ForwardServer)
-			f.connsChan <- tlsConn
+			if f.clientConn == nil {
+				_ = tlsConn.Close()
+				log.Warnf("server %s not ready", serverName)
+				return
+			}
+			f.connsChan <- conn
 			log.Debugf("new connection %s", tlsConn.RemoteAddr().String())
 		}
 	}
@@ -239,7 +246,7 @@ func (s *Server) parseConn(conn *tls.Conn) {
 		log.Warnf("not invalid connection: %s", conn.RemoteAddr().String())
 		pendingData, _ := utils.EncodeDatas([]interface{}{request.magicNumber})
 		ForwardHTTPLoop(pendingData, config.C.Server.LocalHTTPAddr, conn)
-	case request.token != config.C.Server.Token:
+	case request.token != config.C.Token:
 		log.Warnf("not invalid connection whit invalid token %s request: %s", request.token,
 			conn.RemoteAddr().String())
 		ForwardHTTPLoop(httpReqData, config.C.Server.LocalHTTPAddr, conn)
@@ -249,8 +256,12 @@ func (s *Server) parseConn(conn *tls.Conn) {
 			log.Warnf("server %s not found", request.serverName)
 		} else {
 			fs := forwardServer.(*ForwardServer)
-			fs.clientConn = conn
-			isCloseConn = false
+			if err := utils.WriteConn(fs.clientConn, []byte{0x77}); err != nil {
+				log.Warnf("write ack for %s failed", fs.serverName)
+			} else {
+				isCloseConn = false
+				fs.clientConn = conn
+			}
 		}
 	}
 }
@@ -322,7 +333,7 @@ type ForwardServer struct {
 
 	serverName string
 	clientConn net.Conn
-	connsChan  chan *tls.Conn
+	connsChan  chan net.Conn
 
 	sessionWG   sync.WaitGroup
 	sessionsID  uint64
@@ -337,7 +348,7 @@ func newForwardServer(wg *sync.WaitGroup, serverName string) *ForwardServer {
 	}
 
 	fs.stopChan = make(chan struct{})
-	fs.connsChan = make(chan *tls.Conn, 1)
+	fs.connsChan = make(chan net.Conn, 1)
 	fs.sessionsMap = map[uint64]*Session{}
 	fs.sessionsID = mrand.Uint64()
 
@@ -403,7 +414,7 @@ func (fs *ForwardServer) start() {
 	|____________|___________|
 */
 type sessionReqData struct {
-	conn    *tls.Conn
+	conn    net.Conn
 	timeout time.Duration
 
 	magicNumber uint64
@@ -411,7 +422,7 @@ type sessionReqData struct {
 	err         error
 }
 
-func newSessionReqData(conn *tls.Conn, timeout time.Duration) *sessionReqData {
+func newSessionReqData(conn net.Conn, timeout time.Duration) *sessionReqData {
 	r := &sessionReqData{
 		conn:    conn,
 		timeout: timeout,
@@ -440,7 +451,7 @@ func (r *sessionReqData) readSessionID() *sessionReqData {
 	return r
 }
 
-func (fs *ForwardServer) handleSession(conn *tls.Conn) {
+func (fs *ForwardServer) handleSession(conn net.Conn) {
 	isCloseConn := true
 	defer func() {
 		if isCloseConn {
@@ -488,15 +499,15 @@ func (fs *ForwardServer) handleSession(conn *tls.Conn) {
 		var datas = []interface{}{
 			config.MagicNumber,
 			session.sessionID,
-			len(config.C.Server.Token),
-			config.C.Server.Token,
+			len(config.C.Token),
+			config.C.Token,
 		}
 		bytes, err := utils.EncodeDatas(datas)
 		if err != nil {
 			log.Warnf("EncodeDatas failed: %s", err.Error())
 			fs.removeSession(session.sessionID)
 		} else {
-			err = writeConn(fs.clientConn, bytes)
+			err = utils.WriteConn(fs.clientConn, bytes)
 			if err != nil {
 				log.Warnf("write session info failed: %s", err.Error())
 				fs.removeSession(session.sessionID)
@@ -551,17 +562,4 @@ func ForwardHTTPLoop(pendingData []byte, addr string, inConn net.Conn) {
 
 	<-done
 	<-done
-}
-
-func writeConn(conn net.Conn, buf []byte) error {
-	bufLen := len(buf)
-	n := 0
-	for bufLen < n {
-		m, err := conn.Write(buf[n:bufLen])
-		if err != nil {
-			return err
-		}
-		n += m
-	}
-	return nil
 }

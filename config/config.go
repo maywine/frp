@@ -22,8 +22,9 @@ var (
 type Config struct {
 	Type        string `json:"type"`
 	MagicNumber uint64 `json:"magic_number"`
-	Server      struct {
-		Token          string `json:"token"`
+	Token       string `json:"token"`
+
+	Server struct {
 		ListenAddr     string `json:"listen_addr"`
 		Host           string `json:"host"`
 		CertPath       string `json:"cert_path"`
@@ -37,7 +38,6 @@ type Config struct {
 	} `json:"server"`
 
 	Client struct {
-		Token        string `json:"token"`
 		RemoteAddr   string `json:"remote_addr"`
 		RemoteHost   string `json:"remote_host"`
 		LocalServers []struct {
