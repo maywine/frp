@@ -7,7 +7,6 @@ import (
 	"io"
 	mrand "math/rand"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,7 +96,7 @@ func (s *Server) Start() (err error) {
 func (s *Server) Stop() {
 	log.Infof("stop the server...")
 	s.stopChan <- struct{}{}
-	s.listener.Close()
+	_ = s.listener.Close()
 	s.forwardServerMap.Range(func(key, value interface{}) bool {
 		fs := value.(*ForwardServer)
 		if fs != nil {
@@ -113,7 +112,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	tlsConn := conn.(*tls.Conn)
 	if err := tlsConn.Handshake(); err != nil {
 		log.Warnf("handshake failed: %s", err.Error())
-		tlsConn.Close()
+		_ = tlsConn.Close()
 		return
 	}
 
@@ -128,7 +127,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			} else {
 				log.Warnf("server %s not ready", serverName)
 			}
-			tlsConn.Close()
+			_ = tlsConn.Close()
 		} else {
 			f := fs.(*ForwardServer)
 			f.connsChan <- tlsConn
@@ -227,7 +226,7 @@ func (s *Server) parseConn(conn *tls.Conn) {
 	isCloseConn := true
 	defer func() {
 		if isCloseConn {
-			conn.Close()
+			_ = conn.Close()
 		}
 	}()
 
@@ -268,8 +267,8 @@ type Session struct {
 
 func (s *Session) forwardLoop() {
 	defer close(s.waitCh)
-	defer s.clientConn.Close()
-	defer s.serverConn.Close()
+	defer func() { _ = s.clientConn.Close() }()
+	defer func() { _ = s.serverConn.Close() }()
 
 	s.waitCh <- struct{}{}
 
@@ -445,7 +444,7 @@ func (fs *ForwardServer) handleSession(conn *tls.Conn) {
 	isCloseConn := true
 	defer func() {
 		if isCloseConn {
-			conn.Close()
+			_ = conn.Close()
 		}
 	}()
 
@@ -519,14 +518,14 @@ func (fs *ForwardServer) handleSession(conn *tls.Conn) {
 
 // ForwardHTTPLoop forward http
 func ForwardHTTPLoop(pendingData []byte, addr string, inConn net.Conn) {
-	defer inConn.Close()
+	defer func() { _ = inConn.Close() }()
 	outConn, err := net.Dial("tcp", addr)
 	if err != nil {
 		log.Warnf("failed to connect to local http server: %s", err.Error())
 		return
 	}
 
-	defer outConn.Close()
+	defer func() { _ = outConn.Close() }()
 
 	n1 := len(pendingData)
 	n2 := 0
@@ -565,30 +564,4 @@ func writeConn(conn net.Conn, buf []byte) error {
 		n += m
 	}
 	return nil
-}
-
-func readConn(conn net.Conn, buf []byte, maxLen int, timeout time.Duration) (int, error) {
-	if timeout < 1*time.Second {
-		timeout = 1 * time.Second
-	}
-
-	deadline := time.Now().Add(timeout)
-	readLen := 0
-	for readLen < maxLen {
-		if err := conn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
-			return 0, errors.Wrap(err, "set read deadline failed")
-		}
-
-		n, err := conn.Read(buf[readLen:])
-		if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
-			return 0, errors.Wrap(err, "read connection failed")
-		}
-
-		readLen += n
-		if deadline.Before(time.Now()) {
-			return readLen, nil
-		}
-	}
-
-	return readLen, nil
 }
