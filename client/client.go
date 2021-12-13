@@ -34,6 +34,9 @@ func (c *Client) Start() (err error) {
 	for _, client := range clientConfig.LocalServers {
 		localServer := newLocalServer(&c.wg, client.ServerName)
 		c.localServerMap.Store(client.ServerName, localServer)
+		if err := localServer.start(); err != nil {
+			return errors.WithStack(err)
+		}
 	}
 
 	return nil
@@ -41,7 +44,33 @@ func (c *Client) Start() (err error) {
 
 // Session define session
 type Session struct {
-	sessionID uint64
+	sessionID  uint64
+	ls         *LocalServer
+	serverConn net.Conn
+	clinetConn net.Conn
+}
+
+func (s *Session) start() {
+	s.ls.wg.Add(1)
+	go func() {
+		var err error
+		s.clinetConn, err = net.Dial("tcp", s.ls.localAddr)
+		if err != nil {
+
+		}
+	}()
+}
+
+func (s *Session) close() {
+	if s == nil {
+		return
+	}
+	if s.serverConn != nil {
+		_ = s.serverConn.Close()
+	}
+	if s.clinetConn != nil {
+		_ = s.clinetConn.Close()
+	}
 }
 
 // LocalServer define forward server
@@ -52,6 +81,7 @@ type LocalServer struct {
 	remoteAddr string
 	remoteHost string
 	serverName string
+	localAddr  string
 	serverConn net.Conn
 	connsChan  chan net.Conn
 
@@ -71,6 +101,29 @@ func newLocalServer(wg *sync.WaitGroup, serverName string) *LocalServer {
 	return s
 }
 
+func (ls *LocalServer) storeSession(s *Session) {
+	ls.sessionsMut.Lock()
+	defer ls.sessionsMut.Unlock()
+	ls.sessionsMap[s.sessionID] = s
+}
+
+func (ls *LocalServer) loadSession(id uint64) *Session {
+	ls.sessionsMut.Lock()
+	defer ls.sessionsMut.Unlock()
+	return ls.sessionsMap[id]
+}
+
+func (ls *LocalServer) removeSession(id uint64) {
+	ls.sessionsMut.Lock()
+	defer ls.sessionsMut.Unlock()
+	session, ok := ls.sessionsMap[id]
+	if !ok {
+		return
+	}
+	session.close()
+	delete(ls.sessionsMap, id)
+}
+
 func (ls *LocalServer) start() error {
 	if err := ls.connectToRemote(); err != nil {
 		return errors.WithStack(err)
@@ -80,6 +133,9 @@ func (ls *LocalServer) start() error {
 		var magicNumber uint64
 		if err := binary.Read(conn, binary.LittleEndian, &magicNumber); err != nil {
 			return 0, err
+		}
+		if magicNumber != config.MagicNumber {
+			return 0, errors.Errorf("magic number not equal, expect %d, actual %d", config.MagicNumber, magicNumber)
 		}
 		if err := binary.Read(conn, binary.LittleEndian, &id); err != nil {
 			return 0, err
@@ -99,8 +155,19 @@ func (ls *LocalServer) start() error {
 		for {
 			id, err := readSession(ls.serverConn)
 			if err != nil {
-				log.Warnf("read session failed: %s, re-connect to remote", err.Error())
+				log.Warnf("unexpect error: %s, re-connect to remote", err.Error())
+				_ = ls.serverConn.Close()
+				ls.serverConn = nil
 				goto Loop
+			}
+
+			if id == 0 {
+				log.Warnf("ignore invalid zero session id")
+			} else {
+				session := &Session{
+					sessionID: id,
+				}
+				ls.storeSession(session)
 			}
 		}
 	}()
@@ -164,5 +231,14 @@ func (ls *LocalServer) connectToRemote() error {
 	}
 
 	isErr = false
+	return nil
+}
+
+func (ls *LocalServer) connectToRemoteServer() error {
+	return nil
+}
+
+func (ls *LocalServer) connectToLocalServer() error {
+
 	return nil
 }
