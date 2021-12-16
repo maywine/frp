@@ -1,14 +1,23 @@
 package main
 
 import (
-	"frp/config"
 	"math/rand"
 	"os"
 	"time"
 
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+
+	"frp/client"
+	"frp/config"
+	"frp/server"
 )
+
+type service interface {
+	Start() error
+	Stop()
+}
 
 func run(cli *cli.Context) error {
 	configPath := "./frp.config"
@@ -17,8 +26,20 @@ func run(cli *cli.Context) error {
 	}
 	err := config.LoadConfig(configPath)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
+
+	var s service
+	if config.C.Type == "server" {
+		s = server.New()
+	} else {
+		s = client.New()
+	}
+	if err := s.Start(); err != nil {
+		return errors.WithStack(err)
+	}
+	s.Stop()
+
 	return nil
 }
 

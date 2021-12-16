@@ -38,18 +38,18 @@ func New() *Server {
 }
 
 // Start start the server
-func (s *Server) Start() (err error) {
+func (s *Server) Start() error {
 	serverConfig := &config.C.Server
 	serverCert, err := tls.LoadX509KeyPair(serverConfig.CertPath, serverConfig.KeyPath)
 	if err != nil {
-		return errors.Wrap(err, "load certificate failed")
+		return errors.Wrap(err, "load certificate")
 	}
 
 	certs := []tls.Certificate{}
 	for _, fs := range serverConfig.ForwardServers {
 		cert, err := tls.LoadX509KeyPair(fs.CertPath, fs.KeyPath)
 		if err != nil {
-			return errors.Wrap(err, "load certificate failed")
+			return errors.Wrap(err, "load certificate")
 		}
 		certs = append(certs, cert)
 
@@ -68,13 +68,13 @@ func (s *Server) Start() (err error) {
 
 	s.forwardServerMap.Range(func(key, value interface{}) bool {
 		fs := value.(*ForwardServer)
-		s.wg.Add(1)
 		fs.start()
 		return true
 	})
 
 	s.wg.Add(1)
 	go func() {
+		defer s.wg.Add(1)
 		for {
 			select {
 			case <-s.stopChan:
@@ -143,92 +143,6 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-/*
-	      8           4            4          variable
-	 ________________________________________________________
-	|            |         |               |     |           |
-	|magic number|token_len|server_name_len|token|server name|
-	|____________|_________|_______________|_____|___________|
-*/
-type requestData struct {
-	conn    *tls.Conn
-	timeout time.Duration
-
-	tokenLen      uint32
-	serverNameLen uint32
-	magicNumber   uint64
-	token         string
-	serverName    string
-	err           error
-}
-
-func newRequestData(conn *tls.Conn, timeout time.Duration) *requestData {
-	r := &requestData{
-		conn:    conn,
-		timeout: timeout,
-	}
-	return r
-}
-
-func (r *requestData) read(data interface{}) {
-	if r.err != nil {
-		return
-	}
-	if err := r.conn.SetReadDeadline(time.Now().Add(r.timeout)); err != nil {
-		r.err = errors.Wrap(err, "set read deadline failed")
-		return
-	}
-	r.err = binary.Read(r.conn, binary.LittleEndian, data)
-}
-
-func (r *requestData) readTokenLen() *requestData {
-	r.read(&r.tokenLen)
-	return r
-}
-
-func (r *requestData) readServerNameLen() *requestData {
-	r.read(&r.serverNameLen)
-	return r
-}
-
-func (r *requestData) readMagicNumber() *requestData {
-	r.read(&r.magicNumber)
-	if r.err == nil && r.magicNumber != config.MagicNumber {
-		r.err = config.MagicNumberNotEqual
-	}
-	return r
-}
-
-func (r *requestData) readToken() *requestData {
-	token := make([]byte, r.tokenLen)
-	r.read(&token)
-	if r.err != nil {
-		r.token = string(token)
-	}
-	return r
-}
-
-func (r *requestData) readServerName() *requestData {
-	serverName := make([]byte, r.serverNameLen)
-	r.read(&serverName)
-	if r.err != nil {
-		r.serverName = string(serverName)
-	}
-	return r
-}
-
-func (r *requestData) parseRequest() error {
-	r.readMagicNumber().readTokenLen().readServerNameLen()
-	requireLen := r.tokenLen + r.serverNameLen + 16
-	if requireLen > 512 {
-		return errors.Errorf("not invalid connection whit too long request %d : %s",
-			requireLen, r.conn.RemoteAddr().String())
-	}
-	r.readToken().readServerName()
-
-	return r.err
-}
-
 func (s *Server) parseConn(conn *tls.Conn) {
 	isCloseConn := true
 	defer func() {
@@ -263,66 +177,6 @@ func (s *Server) parseConn(conn *tls.Conn) {
 				fs.clientConn = conn
 			}
 		}
-	}
-}
-
-// Session define session
-type Session struct {
-	sessionID   uint64
-	fs          *ForwardServer
-	clientConn  net.Conn
-	serverConn  net.Conn
-	waitCh      chan struct{}
-	pendingData []byte
-}
-
-func (s *Session) forwardLoop() {
-	defer close(s.waitCh)
-	defer func() { _ = s.clientConn.Close() }()
-	defer func() { _ = s.serverConn.Close() }()
-
-	s.waitCh <- struct{}{}
-
-	n1 := len(s.pendingData)
-	n2 := 0
-	for n2 < n1 {
-		n, err := s.serverConn.Write(s.pendingData[n2:])
-		if err != nil {
-			return
-		}
-
-		n2 += n
-	}
-
-	done := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(s.serverConn, s.clientConn)
-		done <- struct{}{}
-	}()
-
-	go func() {
-		_, _ = io.Copy(s.clientConn, s.serverConn)
-		done <- struct{}{}
-	}()
-
-	<-done
-	<-done
-
-	s.fs.removeSession(s.sessionID)
-	s.fs.sessionWG.Done()
-}
-
-func (s *Session) close() {
-	if s == nil {
-		return
-	}
-
-	if s.clientConn != nil {
-		_ = s.clientConn.Close()
-	}
-
-	if s.serverConn != nil {
-		_ = s.serverConn.Close()
 	}
 }
 
@@ -393,17 +247,20 @@ func (fs *ForwardServer) stop() {
 }
 
 func (fs *ForwardServer) start() {
-	defer fs.wg.Done()
-	for {
-		select {
-		case <-fs.stopChan:
-			log.Infof("receive signal to stop")
-			fs.stopAllSessions()
-			return
-		case conn := <-fs.connsChan:
-			go fs.handleSession(conn)
+	fs.wg.Add(1)
+	go func() {
+		defer fs.wg.Done()
+		for {
+			select {
+			case <-fs.stopChan:
+				log.Infof("receive signal to stop")
+				fs.stopAllSessions()
+				return
+			case conn := <-fs.connsChan:
+				go fs.handleSession(conn)
+			}
 		}
-	}
+	}()
 }
 
 /*
@@ -435,7 +292,7 @@ func (r *sessionReqData) read(data interface{}) {
 		return
 	}
 	if err := r.conn.SetReadDeadline(time.Now().Add(r.timeout)); err != nil {
-		r.err = errors.Wrap(err, "set read deadline failed")
+		r.err = errors.Wrap(err, "set read deadline")
 		return
 	}
 	r.err = binary.Read(r.conn, binary.LittleEndian, data)
@@ -499,7 +356,7 @@ func (fs *ForwardServer) handleSession(conn net.Conn) {
 		var datas = []interface{}{
 			config.MagicNumber,
 			session.sessionID,
-			len(config.C.Token),
+			uint32(len(config.C.Token)),
 			config.C.Token,
 		}
 		bytes, err := utils.EncodeDatas(datas)
@@ -525,6 +382,152 @@ func (fs *ForwardServer) handleSession(conn net.Conn) {
 			}
 		}
 	}
+}
+
+// Session define session
+type Session struct {
+	sessionID   uint64
+	fs          *ForwardServer
+	clientConn  net.Conn
+	serverConn  net.Conn
+	waitCh      chan struct{}
+	pendingData []byte
+}
+
+func (s *Session) forwardLoop() {
+	defer close(s.waitCh)
+	defer func() { _ = s.clientConn.Close() }()
+	defer func() { _ = s.serverConn.Close() }()
+
+	s.waitCh <- struct{}{}
+
+	n1 := len(s.pendingData)
+	n2 := 0
+	for n2 < n1 {
+		n, err := s.serverConn.Write(s.pendingData[n2:])
+		if err != nil {
+			return
+		}
+
+		n2 += n
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(s.serverConn, s.clientConn)
+		done <- struct{}{}
+	}()
+
+	go func() {
+		_, _ = io.Copy(s.clientConn, s.serverConn)
+		done <- struct{}{}
+	}()
+
+	<-done
+	<-done
+
+	s.fs.removeSession(s.sessionID)
+	s.fs.sessionWG.Done()
+}
+
+func (s *Session) close() {
+	if s == nil {
+		return
+	}
+
+	if s.clientConn != nil {
+		_ = s.clientConn.Close()
+	}
+
+	if s.serverConn != nil {
+		_ = s.serverConn.Close()
+	}
+}
+
+/*
+	      8           4            4          variable
+	 ________________________________________________________
+	|            |         |               |     |           |
+	|magic number|token_len|server_name_len|token|server name|
+	|____________|_________|_______________|_____|___________|
+*/
+type requestData struct {
+	conn    *tls.Conn
+	timeout time.Duration
+
+	tokenLen      uint32
+	serverNameLen uint32
+	magicNumber   uint64
+	token         string
+	serverName    string
+	err           error
+}
+
+func newRequestData(conn *tls.Conn, timeout time.Duration) *requestData {
+	r := &requestData{
+		conn:    conn,
+		timeout: timeout,
+	}
+	return r
+}
+
+func (r *requestData) read(data interface{}) {
+	if r.err != nil {
+		return
+	}
+	if err := r.conn.SetReadDeadline(time.Now().Add(r.timeout)); err != nil {
+		r.err = errors.Wrap(err, "set read deadline")
+		return
+	}
+	r.err = binary.Read(r.conn, binary.LittleEndian, data)
+}
+
+func (r *requestData) readTokenLen() *requestData {
+	r.read(&r.tokenLen)
+	return r
+}
+
+func (r *requestData) readServerNameLen() *requestData {
+	r.read(&r.serverNameLen)
+	return r
+}
+
+func (r *requestData) readMagicNumber() *requestData {
+	r.read(&r.magicNumber)
+	if r.err == nil && r.magicNumber != config.MagicNumber {
+		r.err = config.MagicNumberNotEqual
+	}
+	return r
+}
+
+func (r *requestData) readToken() *requestData {
+	token := make([]byte, r.tokenLen)
+	r.read(&token)
+	if r.err != nil {
+		r.token = string(token)
+	}
+	return r
+}
+
+func (r *requestData) readServerName() *requestData {
+	serverName := make([]byte, r.serverNameLen)
+	r.read(&serverName)
+	if r.err != nil {
+		r.serverName = string(serverName)
+	}
+	return r
+}
+
+func (r *requestData) parseRequest() error {
+	r.readMagicNumber().readTokenLen().readServerNameLen()
+	requireLen := r.tokenLen + r.serverNameLen + 16
+	if requireLen > 512 {
+		return errors.Errorf("not invalid connection whit too long request %d : %s",
+			requireLen, r.conn.RemoteAddr().String())
+	}
+	r.readToken().readServerName()
+
+	return r.err
 }
 
 // ForwardHTTPLoop forward http
