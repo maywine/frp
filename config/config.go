@@ -25,24 +25,24 @@ type Config struct {
 	Token       string `json:"token"`
 
 	Server struct {
-		ListenAddr     string `json:"listen_addr"`
-		Host           string `json:"host"`
-		CertPath       string `json:"cert_path"`
-		KeyPath        string `json:"key_path"`
-		ForwardServers []struct {
-			ServerName string `json:"server_name"`
-			CertPath   string `json:"cert_path"`
-			KeyPath    string `json:"key_path"`
+		ListenAddr        string `json:"listen_addr"`
+		ControlServerName string `json:"control_server_name"`
+		CertPath          string `json:"cert_path"`
+		KeyPath           string `json:"key_path"`
+		ForwardServers    []struct {
+			ProxyServerName string `json:"proxy_server_name"`
+			CertPath        string `json:"cert_path"`
+			KeyPath         string `json:"key_path"`
 		} `json:"forward_servers"`
 		LocalHTTPAddr string `json:"local_http_addr"`
 	} `json:"server"`
 
 	Client struct {
-		RemoteAddr   string `json:"remote_addr"`
-		RemoteHost   string `json:"remote_host"`
-		LocalServers []struct {
-			ServerName string `json:"server_name"`
-			LocalAddr  string `json:"local_addr"`
+		RemoteAddr        string `json:"remote_addr"`
+		ControlServerName string `json:"control_server_name"`
+		LocalServers      []struct {
+			ProxyServerName string `json:"proxy_server_name"`
+			LocalAddr       string `json:"local_addr"`
 		} `json:"local_servers"`
 	} `json:"client"`
 }

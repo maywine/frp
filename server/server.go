@@ -53,8 +53,8 @@ func (s *Server) Start() error {
 		}
 		certs = append(certs, cert)
 
-		f := newForwardServer(&s.wg, fs.ServerName)
-		s.forwardServerMap.Store(fs.ServerName, f)
+		f := newForwardServer(&s.wg, fs.ProxyServerName)
+		s.forwardServerMap.Store(fs.ProxyServerName, f)
 	}
 	certs = append(certs, serverCert)
 	tlsConfig := tls.Config{
@@ -119,7 +119,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	serverName := tlsConn.ConnectionState().ServerName
-	if serverName == config.C.Server.Host {
+	if serverName == config.C.Server.ControlServerName {
 		s.parseConn(tlsConn)
 	} else {
 		fs, ok := s.forwardServerMap.Load(serverName)

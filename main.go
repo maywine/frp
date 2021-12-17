@@ -3,6 +3,8 @@ package main
 import (
 	"math/rand"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/pkg/errors"
@@ -29,6 +31,9 @@ func run(cli *cli.Context) error {
 		return errors.WithStack(err)
 	}
 
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
 	var s service
 	if config.C.Type == "server" {
 		s = server.New()
@@ -38,8 +43,10 @@ func run(cli *cli.Context) error {
 	if err := s.Start(); err != nil {
 		return errors.WithStack(err)
 	}
-	s.Stop()
 
+	sig := <-sigs
+	log.Infof("receive signal %s to exit", sig.String())
+	s.Stop()
 	return nil
 }
 
@@ -50,7 +57,7 @@ func main() {
 	app.Flags = []cli.Flag{&cli.StringFlag{
 		Name:     "config",
 		Aliases:  []string{"c"},
-		Value:    "./frp.config",
+		Value:    "./frp.json",
 		Usage:    "config file path",
 		Required: false,
 	}}

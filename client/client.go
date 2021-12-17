@@ -35,8 +35,8 @@ func (c *Client) Start() error {
 	clientConfig := &config.C.Client
 	for _, client := range clientConfig.LocalServers {
 		localServer := newLocalServer(&c.wg, client.LocalAddr, clientConfig.RemoteAddr,
-			clientConfig.RemoteHost, client.ServerName)
-		c.localServerMap.Store(client.ServerName, localServer)
+			clientConfig.ControlServerName, client.ProxyServerName)
+		c.localServerMap.Store(client.ProxyServerName, localServer)
 		if err := localServer.start(); err != nil {
 			return errors.WithStack(err)
 		}
@@ -65,10 +65,10 @@ type LocalServer struct {
 	wg       *sync.WaitGroup
 	stopChan chan struct{}
 
-	localAddr        string
-	remoteAddr       string
-	controServerName string
-	proxyServerName  string
+	localAddr         string
+	remoteAddr        string
+	controlServerName string
+	proxyServerName   string
 
 	serverConn net.Conn
 	connsChan  chan net.Conn
@@ -78,16 +78,16 @@ type LocalServer struct {
 	sessionsMap map[uint64]*Session
 }
 
-func newLocalServer(wg *sync.WaitGroup, localAddr, remoteAddr, controServerName, proxyServerName string) *LocalServer {
+func newLocalServer(wg *sync.WaitGroup, localAddr, remoteAddr, controlServerName, proxyServerName string) *LocalServer {
 	s := &LocalServer{
-		wg:               wg,
-		stopChan:         make(chan struct{}),
-		localAddr:        localAddr,
-		remoteAddr:       remoteAddr,
-		controServerName: controServerName,
-		proxyServerName:  proxyServerName,
-		connsChan:        make(chan net.Conn, 1),
-		sessionsMap:      map[uint64]*Session{},
+		wg:                wg,
+		stopChan:          make(chan struct{}),
+		localAddr:         localAddr,
+		remoteAddr:        remoteAddr,
+		controlServerName: controlServerName,
+		proxyServerName:   proxyServerName,
+		connsChan:         make(chan net.Conn, 1),
+		sessionsMap:       map[uint64]*Session{},
 	}
 	return s
 }
@@ -205,7 +205,7 @@ func (ls *LocalServer) stopAllSessions() {
 func (ls *LocalServer) connectToControlServer() error {
 	tlsConfig := tls.Config{
 		Rand:       rand.Reader,
-		ServerName: ls.controServerName,
+		ServerName: ls.controlServerName,
 	}
 
 	var err error
