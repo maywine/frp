@@ -115,7 +115,9 @@ func (ls *LocalServer) start() error {
 		<-ls.stopChan
 		atomic.StoreUint32(&isStop, 1)
 		log.Infof("%s: receive signal to exit", ls.proxyServerName)
-		_ = ls.serverConn.Close()
+		if ls.serverConn != nil {
+			_ = ls.serverConn.Close()
+		}
 		ls.stopAllSessions()
 	}()
 
@@ -126,11 +128,12 @@ func (ls *LocalServer) start() error {
 		if atomic.LoadUint32(&isStop) == 1 {
 			return
 		}
-		for ls.serverConn == nil {
+		if ls.serverConn == nil {
 			err := ls.connectToControlServer()
 			if err != nil {
 				log.Warnf("connect to remote failed: %s", err.Error())
 				time.Sleep(5 * time.Second)
+				goto Loop
 			}
 		}
 		for {
@@ -205,12 +208,16 @@ func (ls *LocalServer) connectToControlServer() error {
 		ServerName: ls.controlServerName,
 	}
 
-	var err error
-	ls.serverConn, err = tls.Dial("tcp", ls.remoteAddr, &tlsConfig)
+	serverConn, err := tls.Dial("tcp", ls.remoteAddr, &tlsConfig)
 	if err != nil {
 		return errors.Wrapf(err, "connect to control server")
 	}
+	err = serverConn.Handshake()
+	if err != nil {
+		return errors.Wrapf(err, "handshake")
+	}
 
+	ls.serverConn = serverConn
 	isErr := true
 	defer func() {
 		if isErr {
@@ -223,18 +230,18 @@ func (ls *LocalServer) connectToControlServer() error {
 		config.MagicNumber,
 		uint32(len(config.C.Token)),
 		uint32(len(ls.proxyServerName)),
-		config.C.Token,
-		ls.proxyServerName,
+		[]byte(config.C.Token),
+		[]byte(ls.proxyServerName),
 	}
 	buf, err := utils.EncodeDatas(datas)
 	if err != nil {
-		return errors.WithStack(err)
+		return errors.WithMessage(err, "encode data")
 	}
 
 	// set deadline
 	err = ls.serverConn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err != nil {
-		return errors.WithStack(err)
+		return errors.WithMessage(err, "set deadline")
 	}
 	err = utils.WriteConn(ls.serverConn, buf)
 	if err != nil {
@@ -308,7 +315,7 @@ type Session struct {
 }
 
 func (s *Session) start() {
-	s.ls.wg.Add(1)
+	s.ls.sessionWG.Add(1)
 	go func() {
 		s.forwardLoop()
 	}()
@@ -329,8 +336,8 @@ func (s *Session) close() {
 func (s *Session) forwardLoop() {
 	defer func() { _ = s.clientConn.Close() }()
 	defer func() { _ = s.serverConn.Close() }()
-	defer s.ls.removeSession(s.sessionID)
 	defer s.ls.sessionWG.Done()
+	defer s.ls.removeSession(s.sessionID)
 
 	done := make(chan struct{})
 	go func() {

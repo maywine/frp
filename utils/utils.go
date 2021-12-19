@@ -22,7 +22,7 @@ func EncodeDatas(datas []interface{}) ([]byte, error) {
 func WriteConn(conn net.Conn, buf []byte) error {
 	bufLen := len(buf)
 	n := 0
-	for bufLen < n {
+	for n < bufLen {
 		m, err := conn.Write(buf[n:bufLen])
 		if err != nil {
 			return err

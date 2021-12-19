@@ -4,6 +4,8 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"path"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -14,6 +16,17 @@ import (
 	"frp/client"
 	"frp/config"
 	"frp/server"
+)
+
+var (
+	logLevelMap = map[string]log.Level{
+		"fatal": log.FatalLevel,
+		"error": log.ErrorLevel,
+		"warn":  log.WarnLevel,
+		"info":  log.InfoLevel,
+		"debug": log.DebugLevel,
+		"trace": log.TraceLevel,
+	}
 )
 
 type service interface {
@@ -31,9 +44,21 @@ func run(cli *cli.Context) error {
 		return errors.WithStack(err)
 	}
 
+	logLevel := config.C.LogLevel
+	if len(logLevel) == 0 {
+		logLevel = "info"
+	}
+	level, ok := logLevelMap[logLevel]
+	if !ok {
+		level = log.InfoLevel
+		log.Warnf("unknown log level %s, using log level info", logLevel)
+	}
+	log.SetLevel(level)
+
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
+	log.Info("server start....")
 	var s service
 	if config.C.Type == "server" {
 		s = server.New()
@@ -69,6 +94,14 @@ func main() {
 }
 
 func init() {
-	log.SetFormatter(&log.TextFormatter{})
+	log.SetReportCaller(true)
+	log.SetFormatter(&log.TextFormatter{
+		DisableColors:   true,
+		TimestampFormat: "2006-01-02 15:03:04",
+		CallerPrettyfier: func(frame *runtime.Frame) (function string, file string) {
+			return frame.Function, path.Base(frame.File)
+		},
+	})
+	log.SetLevel(log.InfoLevel)
 	rand.Seed(time.Now().UnixNano())
 }

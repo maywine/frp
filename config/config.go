@@ -23,6 +23,7 @@ type Config struct {
 	Type        string `json:"type"`
 	MagicNumber uint64 `json:"magic_number"`
 	Token       string `json:"token"`
+	LogLevel    string `json:"log_level"`
 
 	Server struct {
 		ListenAddr        string `json:"listen_addr"`

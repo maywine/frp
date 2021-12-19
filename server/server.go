@@ -134,7 +134,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			f := fs.(*ForwardServer)
 			if f.clientConn == nil {
 				_ = tlsConn.Close()
-				log.Warnf("server %s not ready", serverName)
+				log.Warnf("server %s client not ready", serverName)
 				return
 			}
 			f.connsChan <- conn
@@ -170,11 +170,12 @@ func (s *Server) parseConn(conn *tls.Conn) {
 			log.Warnf("server %s not found", request.serverName)
 		} else {
 			fs := forwardServer.(*ForwardServer)
-			if err := utils.WriteConn(fs.clientConn, []byte{0x77}); err != nil {
+			if err := utils.WriteConn(conn, []byte{0x77}); err != nil {
 				log.Warnf("write ack for %s failed", fs.proxyServerName)
 			} else {
 				isCloseConn = false
 				fs.clientConn = conn
+				log.Infof("server %s ready", fs.proxyServerName)
 			}
 		}
 	}
@@ -357,7 +358,7 @@ func (fs *ForwardServer) handleSession(conn net.Conn) {
 			config.MagicNumber,
 			session.sessionID,
 			uint32(len(config.C.Token)),
-			config.C.Token,
+			[]byte(config.C.Token),
 		}
 		bytes, err := utils.EncodeDatas(datas)
 		if err != nil {
@@ -398,8 +399,8 @@ func (s *Session) forwardLoop() {
 	defer close(s.waitCh)
 	defer func() { _ = s.clientConn.Close() }()
 	defer func() { _ = s.serverConn.Close() }()
-	defer s.fs.removeSession(s.sessionID)
 	defer s.fs.sessionWG.Done()
+	defer s.fs.removeSession(s.sessionID)
 
 	s.waitCh <- struct{}{}
 
@@ -502,7 +503,7 @@ func (r *requestData) readMagicNumber() *requestData {
 func (r *requestData) readToken() *requestData {
 	token := make([]byte, r.tokenLen)
 	r.read(&token)
-	if r.err != nil {
+	if r.err == nil {
 		r.token = string(token)
 	}
 	return r
@@ -511,7 +512,7 @@ func (r *requestData) readToken() *requestData {
 func (r *requestData) readServerName() *requestData {
 	serverName := make([]byte, r.serverNameLen)
 	r.read(&serverName)
-	if r.err != nil {
+	if r.err == nil {
 		r.serverName = string(serverName)
 	}
 	return r
