@@ -132,7 +132,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			_ = tlsConn.Close()
 		} else {
 			f := fs.(*ForwardServer)
-			if f.clientConn == nil {
+			if f.proxyServerConn == nil {
 				_ = tlsConn.Close()
 				log.Warnf("server %s client not ready", serverName)
 				return
@@ -174,7 +174,10 @@ func (s *Server) parseConn(conn *tls.Conn) {
 				log.Warnf("write ack for %s failed", fs.proxyServerName)
 			} else {
 				isCloseConn = false
-				fs.clientConn = conn
+				if fs.proxyServerConn != nil {
+					_ = fs.proxyServerConn.Close()
+				}
+				fs.proxyServerConn = conn
 				log.Infof("server %s ready", fs.proxyServerName)
 			}
 		}
@@ -187,7 +190,7 @@ type ForwardServer struct {
 	stopChan chan struct{}
 
 	proxyServerName string
-	clientConn      net.Conn
+	proxyServerConn net.Conn
 	connsChan       chan net.Conn
 
 	sessionWG   sync.WaitGroup
@@ -365,7 +368,7 @@ func (fs *ForwardServer) handleSession(conn net.Conn) {
 			log.Warnf("EncodeDatas failed: %s", err.Error())
 			fs.removeSession(session.sessionID)
 		} else {
-			err = utils.WriteConn(fs.clientConn, bytes)
+			err = utils.WriteConn(fs.proxyServerConn, bytes)
 			if err != nil {
 				log.Warnf("write session info failed: %s", err.Error())
 				fs.removeSession(session.sessionID)
