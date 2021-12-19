@@ -33,7 +33,7 @@ type Server struct {
 // New create the Server
 func New() *Server {
 	s := new(Server)
-	s.stopChan = make(chan struct{})
+	s.stopChan = make(chan struct{}, 1)
 	return s
 }
 
@@ -74,11 +74,11 @@ func (s *Server) Start() error {
 
 	s.wg.Add(1)
 	go func() {
-		defer s.wg.Add(1)
+		defer s.wg.Done()
 		for {
 			select {
 			case <-s.stopChan:
-				log.Infof("server exit")
+				log.Infof("receive signal to exit")
 				return
 			default:
 			}
@@ -171,7 +171,7 @@ func (s *Server) parseConn(conn *tls.Conn) {
 		} else {
 			fs := forwardServer.(*ForwardServer)
 			if err := utils.WriteConn(fs.clientConn, []byte{0x77}); err != nil {
-				log.Warnf("write ack for %s failed", fs.serverName)
+				log.Warnf("write ack for %s failed", fs.proxyServerName)
 			} else {
 				isCloseConn = false
 				fs.clientConn = conn
@@ -185,9 +185,9 @@ type ForwardServer struct {
 	wg       *sync.WaitGroup
 	stopChan chan struct{}
 
-	serverName string
-	clientConn net.Conn
-	connsChan  chan net.Conn
+	proxyServerName string
+	clientConn      net.Conn
+	connsChan       chan net.Conn
 
 	sessionWG   sync.WaitGroup
 	sessionsID  uint64
@@ -195,13 +195,13 @@ type ForwardServer struct {
 	sessionsMap map[uint64]*Session
 }
 
-func newForwardServer(wg *sync.WaitGroup, serverName string) *ForwardServer {
+func newForwardServer(wg *sync.WaitGroup, proxyServerName string) *ForwardServer {
 	fs := &ForwardServer{
-		wg:         wg,
-		serverName: serverName,
+		wg:              wg,
+		proxyServerName: proxyServerName,
 	}
 
-	fs.stopChan = make(chan struct{})
+	fs.stopChan = make(chan struct{}, 1)
 	fs.connsChan = make(chan net.Conn, 1)
 	fs.sessionsMap = map[uint64]*Session{}
 	fs.sessionsID = mrand.Uint64()
@@ -253,7 +253,7 @@ func (fs *ForwardServer) start() {
 		for {
 			select {
 			case <-fs.stopChan:
-				log.Infof("receive signal to stop")
+				log.Infof("%s: receive signal to stop", fs.proxyServerName)
 				fs.stopAllSessions()
 				return
 			case conn := <-fs.connsChan:
@@ -372,11 +372,11 @@ func (fs *ForwardServer) handleSession(conn net.Conn) {
 				ticker := time.NewTicker(10 * time.Second)
 				select {
 				case <-ticker.C:
-					log.Warnf("wait for server %s timeout", fs.serverName)
+					log.Warnf("wait for server %s timeout", fs.proxyServerName)
 					fs.removeSession(session.sessionID)
 					ForwardHTTPLoop(session.pendingData, config.C.Server.LocalHTTPAddr, conn)
 				case <-session.waitCh:
-					log.Infof("new session for %s handshake done", fs.serverName)
+					log.Infof("new session for %s handshake done", fs.proxyServerName)
 					isCloseConn = false
 				}
 			}
@@ -398,6 +398,8 @@ func (s *Session) forwardLoop() {
 	defer close(s.waitCh)
 	defer func() { _ = s.clientConn.Close() }()
 	defer func() { _ = s.serverConn.Close() }()
+	defer s.fs.removeSession(s.sessionID)
+	defer s.fs.sessionWG.Done()
 
 	s.waitCh <- struct{}{}
 
@@ -425,9 +427,6 @@ func (s *Session) forwardLoop() {
 
 	<-done
 	<-done
-
-	s.fs.removeSession(s.sessionID)
-	s.fs.sessionWG.Done()
 }
 
 func (s *Session) close() {

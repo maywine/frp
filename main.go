@@ -22,7 +22,7 @@ type service interface {
 }
 
 func run(cli *cli.Context) error {
-	configPath := "./frp.config"
+	configPath := "./frp.json"
 	if cli.IsSet("config") {
 		configPath = cli.String("config")
 	}

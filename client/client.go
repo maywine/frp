@@ -19,14 +19,12 @@ import (
 // Client define server
 type Client struct {
 	localServerMap sync.Map
-	stopChan       chan struct{}
 	wg             sync.WaitGroup
 }
 
 // New create the Client
 func New() *Client {
 	c := new(Client)
-	c.stopChan = make(chan struct{})
 	return c
 }
 
@@ -48,7 +46,6 @@ func (c *Client) Start() error {
 // Stop stop the client
 func (s *Client) Stop() {
 	log.Infof("stop the client...")
-	s.stopChan <- struct{}{}
 	s.localServerMap.Range(func(key, value interface{}) bool {
 		ls := value.(*LocalServer)
 		if ls != nil {
@@ -81,7 +78,7 @@ type LocalServer struct {
 func newLocalServer(wg *sync.WaitGroup, localAddr, remoteAddr, controlServerName, proxyServerName string) *LocalServer {
 	s := &LocalServer{
 		wg:                wg,
-		stopChan:          make(chan struct{}),
+		stopChan:          make(chan struct{}, 1),
 		localAddr:         localAddr,
 		remoteAddr:        remoteAddr,
 		controlServerName: controlServerName,
@@ -117,9 +114,9 @@ func (ls *LocalServer) start() error {
 		defer ls.wg.Done()
 		<-ls.stopChan
 		atomic.StoreUint32(&isStop, 1)
+		log.Infof("%s: receive signal to exit", ls.proxyServerName)
 		_ = ls.serverConn.Close()
 		ls.stopAllSessions()
-
 	}()
 
 	ls.wg.Add(1)
@@ -332,6 +329,8 @@ func (s *Session) close() {
 func (s *Session) forwardLoop() {
 	defer func() { _ = s.clientConn.Close() }()
 	defer func() { _ = s.serverConn.Close() }()
+	defer s.ls.removeSession(s.sessionID)
+	defer s.ls.sessionWG.Done()
 
 	done := make(chan struct{})
 	go func() {
@@ -346,7 +345,4 @@ func (s *Session) forwardLoop() {
 
 	<-done
 	<-done
-
-	s.ls.removeSession(s.sessionID)
-	s.ls.sessionWG.Done()
 }

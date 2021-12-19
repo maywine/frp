@@ -29,12 +29,12 @@ type Config struct {
 		ControlServerName string `json:"control_server_name"`
 		CertPath          string `json:"cert_path"`
 		KeyPath           string `json:"key_path"`
+		LocalHTTPAddr     string `json:"local_http_addr"`
 		ForwardServers    []struct {
 			ProxyServerName string `json:"proxy_server_name"`
 			CertPath        string `json:"cert_path"`
 			KeyPath         string `json:"key_path"`
 		} `json:"forward_servers"`
-		LocalHTTPAddr string `json:"local_http_addr"`
 	} `json:"server"`
 
 	Client struct {
