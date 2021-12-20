@@ -4,8 +4,6 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/binary"
-	"frp/config"
-	"frp/utils"
 	"io"
 	"net"
 	"sync"
@@ -14,6 +12,9 @@ import (
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+
+	"frp/config"
+	"frp/utils"
 )
 
 // Client define server
@@ -204,8 +205,9 @@ func (ls *LocalServer) stopAllSessions() {
 
 func (ls *LocalServer) connectToControlServer() error {
 	tlsConfig := tls.Config{
-		Rand:       rand.Reader,
-		ServerName: ls.controlServerName,
+		Rand:               rand.Reader,
+		ServerName:         ls.controlServerName,
+		GetConfigForClient: utils.SetTCPKeepAlive,
 	}
 
 	serverConn, err := tls.Dial("tcp", ls.remoteAddr, &tlsConfig)

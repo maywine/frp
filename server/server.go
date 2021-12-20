@@ -58,8 +58,9 @@ func (s *Server) Start() error {
 	}
 	certs = append(certs, serverCert)
 	tlsConfig := tls.Config{
-		Certificates: certs,
-		Rand:         rand.Reader,
+		Certificates:       certs,
+		Rand:               rand.Reader,
+		GetConfigForClient: utils.SetTCPKeepAlive,
 	}
 	s.listener, err = tls.Listen("tcp", config.C.Server.ListenAddr, &tlsConfig)
 	if err != nil {
@@ -83,6 +84,7 @@ func (s *Server) Start() error {
 			default:
 			}
 			con, err := s.listener.Accept()
+
 			if err != nil {
 				log.Warnf("accept failed: %s", err.Error())
 				continue
