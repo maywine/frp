@@ -180,6 +180,8 @@ func (s *Server) parseConn(conn *tls.Conn) {
 					_ = fs.proxyServerConn.Close()
 				}
 				fs.proxyServerConn = conn
+				// reset deadline
+				_ = fs.proxyServerConn.SetDeadline(time.Time{})
 				log.Infof("server %s ready", fs.proxyServerName)
 			}
 		}
