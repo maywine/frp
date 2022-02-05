@@ -341,6 +341,7 @@ func (fs *ForwardServer) handleSession(conn net.Conn) {
 				isCloseConn = false
 				session.serverConn = conn
 				fs.sessionWG.Add(1)
+				_ = session.serverConn.SetDeadline(time.Time{})
 				session.forwardLoop()
 			}
 		}
@@ -377,6 +378,7 @@ func (fs *ForwardServer) handleSession(conn net.Conn) {
 				log.Warnf("write session info failed: %s", err.Error())
 				fs.removeSession(session.sessionID)
 			} else {
+				_ = session.clientConn.SetDeadline(time.Time{})
 				ticker := time.NewTicker(10 * time.Second)
 				select {
 				case <-ticker.C:
