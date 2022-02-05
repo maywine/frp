@@ -416,6 +416,7 @@ func (s *Session) forwardLoop() {
 	for n2 < n1 {
 		n, err := s.serverConn.Write(s.pendingData[n2:])
 		if err != nil {
+			log.Warnf("failed to forward data: %s", err.Error())
 			return
 		}
 
@@ -424,12 +425,18 @@ func (s *Session) forwardLoop() {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(s.serverConn, s.clientConn)
+		_, err := io.Copy(s.serverConn, s.clientConn)
+		if err != nil {
+			log.Warnf("failed to forward data: %s", err.Error())
+		}
 		done <- struct{}{}
 	}()
 
 	go func() {
-		_, _ = io.Copy(s.clientConn, s.serverConn)
+		_, err := io.Copy(s.clientConn, s.serverConn)
+		if err != nil {
+			log.Warnf("failed to forward data: %s", err.Error())
+		}
 		done <- struct{}{}
 	}()
 
@@ -553,6 +560,7 @@ func ForwardHTTPLoop(pendingData []byte, addr string, inConn net.Conn) {
 	for n2 < n1 {
 		n, err := outConn.Write(pendingData[n2:])
 		if err != nil {
+			log.Warnf("failed to write to local http server: %s", err.Error())
 			return
 		}
 
@@ -561,12 +569,18 @@ func ForwardHTTPLoop(pendingData []byte, addr string, inConn net.Conn) {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(outConn, inConn)
+		_, err := io.Copy(outConn, inConn)
+		if err != nil {
+			log.Warnf("failed to forward local http server: %s", err.Error())
+		}
 		done <- struct{}{}
 	}()
 
 	go func() {
-		_, _ = io.Copy(inConn, outConn)
+		_, err := io.Copy(inConn, outConn)
+		if err != nil {
+			log.Warnf("failed to forward local http server: %s", err.Error())
+		}
 		done <- struct{}{}
 	}()
 

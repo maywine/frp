@@ -343,12 +343,18 @@ func (s *Session) forwardLoop() {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(s.serverConn, s.clientConn)
+		_, err := io.Copy(s.serverConn, s.clientConn)
+		if err != nil {
+			log.Warnf("failed to forward data: %s", err.Error())
+		}
 		done <- struct{}{}
 	}()
 
 	go func() {
-		_, _ = io.Copy(s.clientConn, s.serverConn)
+		_, err := io.Copy(s.clientConn, s.serverConn)
+		if err != nil {
+			log.Warnf("failed to forward data: %s", err.Error())
+		}
 		done <- struct{}{}
 	}()
 
