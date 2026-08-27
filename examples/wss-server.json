@@ -1,0 +1,21 @@
+{
+  "type": "server",
+  "transport": "wss_mux",
+  "token": "replace-with-a-random-secret",
+  "log_level": "info",
+  "server": {
+    "listen_addr": "127.0.0.1:4002",
+    "control_server_name": "tunnel.example.com",
+    "websocket_path": "/api/v1/events",
+    "forward_servers": [
+      {
+        "proxy_server_name": "app.example.com",
+        "listen_addr": "127.0.0.1:18001"
+      },
+      {
+        "proxy_server_name": "api.example.com",
+        "listen_addr": "127.0.0.1:18002"
+      }
+    ]
+  }
+}

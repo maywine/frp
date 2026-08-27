@@ -1,0 +1,22 @@
+{
+  "type": "client",
+  "transport": "wss_mux",
+  "token": "replace-with-a-random-secret",
+  "log_level": "info",
+  "client": {
+    "remote_addr": "relay.example.com:443",
+    "control_server_name": "relay.example.com",
+    "websocket_path": "/api/v1/events",
+    "websocket_scheme": "wss",
+    "local_servers": [
+      {
+        "proxy_server_name": "app.example.com",
+        "local_addr": "127.0.0.1:8080"
+      },
+      {
+        "proxy_server_name": "api.example.com",
+        "local_addr": "127.0.0.1:9000"
+      }
+    ]
+  }
+}

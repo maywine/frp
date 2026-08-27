@@ -58,12 +58,20 @@ func run(cli *cli.Context) error {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	log.Info("server start....")
+	log.Info("service start")
 	var s service
-	if config.C.Type == "server" {
-		s = server.New()
+	if config.C.Transport == config.TransportWSSMux {
+		if config.C.Type == "server" {
+			s = server.NewWSS()
+		} else {
+			s = client.NewWSS()
+		}
 	} else {
-		s = client.New()
+		if config.C.Type == "server" {
+			s = server.New()
+		} else {
+			s = client.New()
+		}
 	}
 	if err := s.Start(); err != nil {
 		return errors.WithStack(err)
@@ -97,7 +105,7 @@ func init() {
 	log.SetReportCaller(true)
 	log.SetFormatter(&log.TextFormatter{
 		DisableColors:   true,
-		TimestampFormat: "2006-01-02 15:03:04",
+		TimestampFormat: "2006-01-02 15:04:05",
 		CallerPrettyfier: func(frame *runtime.Frame) (function string, file string) {
 			return frame.Function, path.Base(frame.File)
 		},

@@ -46,10 +46,10 @@ func setKeepaliveParameters(conn *net.TCPConn) {
 	_ = rawConn.Control(func(fdPtr uintptr) {
 		fd := int(fdPtr)
 		if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_KEEPCNT, 3); err != nil {
-			log.Warn("on setting keepalive probe count, error: %s", err.Error())
+			log.Warnf("on setting keepalive probe count, error: %s", err.Error())
 		}
 		if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_KEEPINTVL, 3); err != nil {
-			log.Warn("on setting keepalive retry interval, error: %s", err.Error())
+			log.Warnf("on setting keepalive retry interval, error: %s", err.Error())
 		}
 	})
 }
@@ -58,10 +58,10 @@ func setKeepaliveParameters(conn *net.TCPConn) {
 func SetTCPKeepAlive(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
 	if tcpConn, ok := clientHello.Conn.(*net.TCPConn); ok {
 		if err := tcpConn.SetKeepAlive(true); err != nil {
-			log.Warn("could not enable keep alive, error: %s", err.Error())
+			log.Warnf("could not enable keep alive, error: %s", err.Error())
 		}
 		if err := tcpConn.SetKeepAlivePeriod(30 * time.Second); err != nil {
-			log.Warn("could not set keep alive period, error: %s", err.Error())
+			log.Warnf("could not set keep alive period, error: %s", err.Error())
 		}
 		setKeepaliveParameters(tcpConn)
 	} else {
